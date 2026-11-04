@@ -123,6 +123,7 @@ func installChatUIHooks() {
             return $0.list.items.reversed()
         }
     }, botForumChatListItems: { peerId, account in
+        BotForumTopicInfoSync.shared.syncIfNeeded(peerId: peerId, account: account)
         return chatListViewForLocation(chatListLocation: .forum(peerId: peerId), location: .Initial(0, nil), filter: nil, account: account) |> map {
             return $0.list.items.reversed()
         } |> map {
@@ -753,3 +754,34 @@ extension ChatInteraction: @retroactive NewPollChatInteraction {
 }
 
 extension MediaPreviewEditControl: @retroactive ChatMediaEditControl {}
+
+
+/// Bot forums in private chats only learn about topic renames from messageActionTopicEdit
+/// service messages; when a rename arrives without one, the stored title (e.g. the "/start"
+/// that opened the topic) never changes. Re-read topic titles from the server when the bot
+/// chat is opened, at most once per minute per bot.
+private final class BotForumTopicInfoSync {
+    static let shared = BotForumTopicInfoSync()
+
+    private struct Key: Hashable {
+        let accountPeerId: PeerId
+        let peerId: PeerId
+    }
+
+    private let lock = NSLock()
+    private var lastSync: [Key: CFAbsoluteTime] = [:]
+    private let minInterval: CFAbsoluteTime = 60
+
+    func syncIfNeeded(peerId: PeerId, account: Account) {
+        let key = Key(accountPeerId: account.peerId, peerId: peerId)
+        let now = CFAbsoluteTimeGetCurrent()
+        self.lock.lock()
+        if let last = self.lastSync[key], now - last < self.minInterval {
+            self.lock.unlock()
+            return
+        }
+        self.lastSync[key] = now
+        self.lock.unlock()
+        let _ = TelegramEngine(account: account).peers.syncForumTopicInfos(id: peerId).startStandalone()
+    }
+}
